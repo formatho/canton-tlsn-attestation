@@ -1,0 +1,208 @@
+daml-version 2.3
+-- Integration tests for TLSNotary + Canton end-to-end flow
+
+module TLSNotaryAttestation.IntegrationTests
+  ( integrationTests
+  ) where
+
+import DA.Assert
+import DA.Time
+import DA.Map qualified as Map
+import TLSNotaryAttestation
+
+-- | Integration tests combining TLSNotary proof generation with Canton contracts
+integrationTests : Script ()
+integrationTests = do
+  scenario "End-to-end TLSNotary integration" $ do
+    testTLSNotaryIntegration
+
+  scenario "Multi-institution trust flow" $ do
+    testMultiInstitutionFlow
+
+-- ============================================================================
+-- Integration Test 1: End-to-End TLSNotary Integration
+-- ============================================================================
+
+-- | Test complete flow: TLSNotary proof generation → Canton contract submission
+testTLSNotaryIntegration : Script ()
+testTLSNotaryIntegration = do
+  -- Setup parties
+  alice <- allocateParty "Alice"
+  operator <- allocateParty "Operator"
+  bank <- allocateParty "Bank"
+
+  -- Step 1: Register Notary (simulating TLSNotary official notary)
+  notaryCid <- submit operator $ createCmd NotaryInfo
+    { notaryId = "tlsnotary-official"
+    , publicKey = "031b84c5567b126440995d3ed5aaba0565d71e1834604819ff9c17f5e9d5dd078f"
+    , name = "TLSNotary Official Notary Service"
+    , registeredAt = getTime
+    , expiresAt = None
+    }
+
+  -- Step 2: Simulate TLSNotary attestation generation
+  -- In real scenario, this would come from actual TLSNotary CLI output
+  let attestationData = simulateTLSNotaryAttestation
+
+  -- Step 3: Create AttestationProof on Canton
+  attestationProofCid <- submit alice $ createCmd AttestationProof
+    { prover = alice
+    , operator = operator
+    , attestationData = attestationData
+    , notaryCid = notaryCid
+    }
+
+  -- Step 4: Verify attestation (operator verifies cryptographic signature)
+  _ <- submit operator $ exerciseCmd attestationProofCid (VerifyAttestation Verified)
+
+  -- Step 5: Verify the attestation is now marked as verified
+  verifiedProof <- fetch attestationProofCid
+  assertMsg "Attestation should be verified" (isVerified (attestationData verifiedProof))
+
+  -- Step 6: Create KYC verification for bank
+  kycVerificationCid <- submit operator $ createCmd KYCVerification
+    { user = alice
+    , institution = bank
+    , operator = operator
+    , attestationCid = attestationProofCid
+    , requiredAttributes = ["age>18", "identity_verified", "country_compliant"]
+    , isApproved = False
+    , verifiedAt = getTime
+    , expiresAt = time (toUnixTime (getTime) + 365 * 24 * 60 * 60)
+    }
+
+  -- Step 7: Bank verifies KYC status
+  isValid <- submit alice $ exerciseCmd kycVerificationCid IsValid
+
+  -- At this point, should be valid (attestation verified, KYC pending approval)
+  assertMsg "KYC should be valid before approval" (not isValid)
+
+  -- Step 8: Operator approves KYC
+  _ <- submit operator $ exerciseCmd kycVerificationCid ApproveKYC
+
+  -- Step 9: Verify KYC is now approved and valid
+  approvedKYC <- fetch kycVerificationCid
+  assertMsg "KYC should be approved" (isApproved approvedKYC)
+
+  isValidAfterApproval <- submit alice $ exerciseCmd kycVerificationCid IsValid
+  assertMsg "KYC should be valid after approval" isValidAfterApproval
+
+-- ============================================================================
+-- Integration Test 2: Multi-Institution Trust Flow
+-- ============================================================================
+
+-- | Test one TLSNotary attestation used by multiple institutions
+testMultiInstitutionFlow : Script ()
+testMultiInstitutionFlow = do
+  -- Setup parties
+  alice <- allocateParty "Alice"
+  operator <- allocateParty "Operator"
+  bank <- allocateParty "Bank"
+  exchange <- allocateParty "Exchange"
+  insurance <- allocateParty "Insurance"
+
+  -- Step 1: Register Notary
+  notaryCid <- submit operator $ createCmd NotaryInfo
+    { notaryId = "tlsnotary-official"
+    , publicKey = "031b84c5567b126440995d3ed5aaba0565d71e1834604819ff9c17f5e9d5dd078f"
+    , name = "TLSNotary Official Notary Service"
+    , registeredAt = getTime
+    , expiresAt = None
+    }
+
+  -- Step 2: Create single AttestationProof
+  attestationData <- simulateTLSNotaryAttestation
+  attestationProofCid <- submit alice $ createCmd AttestationProof
+    { prover = alice
+    , operator = operator
+    , attestationData = attestationData
+    , notaryCid = notaryCid
+    }
+
+  -- Step 3: Verify attestation once
+  _ <- submit operator $ exerciseCmd attestationProofCid (VerifyAttestation Verified)
+
+  -- Step 4: Multiple institutions create KYCVerification using same attestation
+  bankKycCid <- submit operator $ createCmd KYCVerification
+    { user = alice
+    , institution = bank
+    , operator = operator
+    , attestationCid = attestationProofCid
+    , requiredAttributes = ["age>18", "identity_verified"]
+    , isApproved = False
+    , verifiedAt = getTime
+    , expiresAt = time (toUnixTime (getTime) + 365 * 24 * 60 * 60)
+    }
+
+  exchangeKycCid <- submit operator $ createCmd KYCVerification
+    { user = alice
+    , institution = exchange
+    , operator = operator
+    , attestationCid = attestationProofCid
+    , requiredAttributes = ["age>18", "identity_verified", "trading_experience"]
+    , isApproved = False
+    , verifiedAt = getTime
+    , expiresAt = time (toUnixTime (getTime) + 365 * 24 * 60 * 60)
+    }
+
+  insuranceKycCid <- submit operator $ createCmd KYCVerification
+    { user = alice
+    , institution = insurance
+    , operator = operator
+    , attestationCid = attestationProofCid
+    , requiredAttributes = ["age>18", "health_verified"]
+    , isApproved = False
+    , verifiedAt = getTime
+    , expiresAt = time (toUnixTime (getTime) + 365 * 24 * 60 * 60)
+    }
+
+  -- Step 5: Approve all KYC verifications
+  _ <- submit operator $ exerciseCmd bankKycCid ApproveKYC
+  _ <- submit operator $ exerciseCmd exchangeKycCid ApproveKYC
+  _ <- submit operator $ exerciseCmd insuranceKycCid ApproveKYC
+
+  -- Step 6: Verify all institutions can validate independently
+  bankValid <- submit alice $ exerciseCmd bankKycCid IsValid
+  exchangeValid <- submit alice $ exerciseCmd exchangeKycCid IsValid
+  insuranceValid <- submit alice $ exerciseCmd insuranceKycCid IsValid
+
+  assertMsg "Bank KYC should be valid" bankValid
+  assertMsg "Exchange KYC should be valid" exchangeValid
+  assertMsg "Insurance KYC should be valid" insuranceValid
+
+-- ============================================================================
+-- Helper Functions
+-- ============================================================================
+
+-- | Simulate TLSNotary attestation generation
+-- In production, this would parse actual TLSNotary output files
+simulateTLSNotaryAttestation : Script AttestationData
+simulateTLSNotaryAttestation = do
+  -- Simulate output from: cargo run --release --example attestation_prove
+  -- Files generated:
+  -- - example-json.attestation.tlsn
+  -- - example-json.presentation.tlsn
+  -- - example-json.secrets.tlsn
+
+  let attestationId = "integration-test-attestation-" <> show (getTime)
+  let attestationHash = "a1b2c3d4e5f6..."  -- Would be actual hash in production
+  let presentationHash = "f1e2d3c4b5a6..."  -- Would be actual hash in production
+
+  pure AttestationData
+    { attestationId = attestationId
+    , notaryId = "tlsnotary-official"
+    , serverName = "kyc-provider.example.com"
+    , sessionTimestamp = getTime
+    , attestationHash = attestationHash
+    , presentationHash = presentationHash
+    , dataType = "KYC"
+    , hasRedactions = True  -- Privacy-preserving
+    , isVerified = False  -- Not yet verified on-chain
+    }
+
+-- | Assert that two values are equal
+assertEq : Eq a => Show a => Text -> a -> a -> Script ()
+assertEq label expected actual =
+  if expected == actual
+  then pure ()
+  else assertMsg (label <> ": expected " <> show expected <> ", got " <> show actual) False
