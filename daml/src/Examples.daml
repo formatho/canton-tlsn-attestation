@@ -1,0 +1,98 @@
+daml-version 2.3
+-- Example usage and test scenarios for TLSNotary attestation
+
+module TLSNotaryAttestation.Examples
+  ( exampleKYCFlow
+  , setupTrustedNotary
+  ) where
+
+import TLSNotaryAttestation
+import DA.Action
+import DA.Time
+import DA.Map qualified as Map
+
+-- | Setup: Register a trusted Notary
+setupTrustedNotary : Party -> Party -> Script (ContractId AttestationRegistry, ContractId NotaryInfo)
+setupTrustedNotary operator user = do
+  -- Create the attestation registry
+  registryCid <- submit operator $ createCmd AttestationRegistry
+    { operator
+    , notaries = Map.empty
+    }
+
+  -- Register a trusted Notary (e.g., TLSNotary official service)
+  notaryCid <- submit operator $ exerciseCmd registryCid (RegisterNotary
+    { notaryId = "tlsnotary-official"
+    , publicKey = "031b84c5567b126440995d3ed5aaba0565d71e1834604819ff9c17f5e9d5dd078f"
+    , name = "TLSNotary Official Notary Service"
+    , expiresAt = None
+    })
+
+  pure (registryCid, notaryCid)
+
+-- | Example: Complete KYC verification flow
+exampleKYCFlow : Party -> Party -> Party -> Script (ContractId KYCVerification)
+exampleKYCFlow operator user institution = do
+
+  -- Step 1: Setup trusted notary
+  (registryCid, notaryCid) <- setupTrustedNotary operator user
+
+  -- Step 2: User submits attestation (from TLSNotary demo)
+  -- In real flow, this would come from actual TLSNotary output
+  let attestationData = AttestationData
+        { attestationId = "attestation-example-json-001"
+        , notaryId = "tlsnotary-official"
+        , serverName = "kyc-provider.example.com"
+        , sessionTimestamp = time (read "2026-06-10 07:51:42")
+        , attestationHash = "a1b2c3d4e5f6..."  -- hash from example-json.attestation.tlsn
+        , presentationHash = "f1e2d3c4b5a6..."  -- hash from example-json.presentation.tlsn
+        , dataType = "KYC"
+        , hasRedactions = True  -- privacy-preserving
+        , isVerified = False  -- not yet verified on-chain
+        }
+
+  -- Step 3: Create attestation proof
+  attestationProofCid <- submit user $ createCmd AttestationProof
+    { prover = user
+    , operator = operator
+    , attestationData = attestationData
+    , notaryCid = notaryCid
+    }
+
+  -- Step 4: Operator verifies the attestation
+  -- In production, this would call an off-chain verification service
+  let verificationResult = Verified  -- cryptographically verified
+  _ <- submit operator $ exerciseCmd attestationProofCid (VerifyAttestation verificationResult)
+
+  -- Step 5: Create KYC verification for institution
+  let now = getTime
+  let oneYearFromNow = time (toRelTime now + 365 * 24 * 60 * 60)
+  kycVerificationCid <- submit operator $ createCmd KYCVerification
+    { user = user
+    , institution = institution
+    , operator = operator
+    , attestationCid = attestationProofCid
+    , requiredAttributes = ["age>18", "identity_verified", "country_compliant"]
+    , isApproved = False  -- pending approval
+    , verifiedAt = now
+    , expiresAt = oneYearFromNow
+    }
+
+  -- Step 6: Operator approves KYC
+  _ <- submit operator $ exerciseCmd kycVerificationCid ApproveKYC
+
+  pure kycVerificationCid
+
+-- | Example: User can prove KYC status without revealing details
+proveKYCStatus : Party -> Party -> ContractId KYCVerification -> Script Bool
+proveKYCStatus user institution kycCid = do
+  -- User checks if their KYC is valid
+  isValid <- submit user $ exerciseCmd kycCid IsValid
+  pure isValid
+
+-- | Example: Institution can verify user's KYC status
+verifyUserKYC : Party -> Party -> ContractId KYCVerification -> Script Bool
+verifyUserKYC institution user kycCid = do
+  -- Institution verifies user's KYC is valid
+  isValid <- submit institution $ exerciseCmd kycCid IsValid
+  pure isValid

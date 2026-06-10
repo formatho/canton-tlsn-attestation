@@ -1,0 +1,250 @@
+daml-version 2.3
+-- Canton TLSNotary Attestation Smart Contracts
+-- Privacy-preserving KYC verification using TLSNotary cryptographic proofs
+
+module TLSNotaryAttestation
+  ( AttestationRegistry
+  , KYCVerification
+  , AttestationProof
+  , VerificationResult(..)
+  , NotaryInfo
+  , AttestationData
+  ) where
+
+import DA.Action
+import DA.Assert
+import DA.Time
+import DA.Foldable (traverse_)
+import Daml.Trigger (Trigger, TriggerA, TriggerAuthKey)
+import Daml.Trigger.AutoAccept
+import DA.Next
+import qualified Daml.Trigger as Trigger
+
+-- | Information about a trusted Notary service
+data NotaryInfo = NotaryInfo
+  with
+    notaryId : Text
+    publicKey : Text  -- hex-encoded public key (e.g., k256/secp256r1)
+    name : Text
+    -- | Timestamp when this notary was registered
+    registeredAt : Time
+    -- | Optional expiration for trust in this notary
+    expiresAt : Optional Time
+  deriving (Eq, Show)
+
+-- | Core attestation data from TLSNotary
+data AttestationData = AttestationData
+  with
+    -- | Unique attestation identifier
+    attestationId : Text
+    -- | Notary that signed this attestation
+    notaryId : Text
+    -- | Server that was notarized (e.g., "test-server.io")
+    serverName : Text
+    -- | Timestamp of the TLS session
+    sessionTimestamp : Time
+    -- | Hash of the attestation file
+    attestationHash : Text
+    -- | Hash of the selective disclosure presentation
+    presentationHash : Text
+    -- | Type of data notarized (KYC, identity, etc.)
+    dataType : Text
+    -- | Whether sensitive data was redacted
+    hasRedactions : Bool
+    -- | Verification status (on-chain verification of signature)
+    isVerified : Bool
+  deriving (Eq, Show)
+
+-- | Registry of trusted Notaries
+template AttestationRegistry
+  with
+    operator : Party
+    -- | Mapping of notary IDs to their info
+    notaries : Map Text NotaryInfo
+  where
+    signatory operator
+    observer operator
+
+    -- | Register a new trusted Notary
+    nonconsuming choice RegisterNotary : ContractId NotaryInfo
+      with
+        notaryId : Text
+        publicKey : Text
+        name : Text
+        expiresAt : Optional Time
+      controller operator
+      do
+        assertMsg "Notary ID already exists" (not $ member notaryId notaries)
+        let now = getTime
+        let notaryInfo = NotaryInfo
+              { notaryId
+              , publicKey
+              , name
+              , registeredAt = now
+              , expiresAt
+              }
+        let updatedNotaries = insert notaryId notaryInfo notaries
+        create this with notaries = updatedNotaries
+        create notaryInfo
+
+    -- | Revoke trust in a Notary
+    nonconsuming choice RevokeNotary : ContractId AttestationRegistry
+      with
+        notaryId : Text
+      controller operator
+      do
+        assertMsg "Notary ID does not exist" (member notaryId notaries)
+        let updatedNotaries = delete notaryId notaries
+        create this with notaries = updatedNotaries
+        return this.cid
+
+    -- | Get Notary information
+    nonconsuming choice GetNotary : NotaryInfo
+      with
+        notaryId : Text
+      controller operator
+      do
+        assertMsg "Notary ID does not exist" (member notaryId notaries)
+        return $ lookup notaryId notaries
+
+-- | Individual attestation proof on-chain
+template AttestationProof
+  with
+    -- | Party that submitted the attestation
+    prover : Party
+    -- | Operator overseeing verification
+    operator : Party
+    -- | The attestation data
+    attestationData : AttestationData
+    -- | Reference to the notary that signed this
+    notaryCid : ContractId NotaryInfo
+  where
+    signatory prover, operator
+    observer prover, operator
+
+    -- | Verify the attestation (called by operator)
+    nonconsuming choice VerifyAttestation : ContractId AttestationProof
+      with
+        -- | External verification result (from off-chain verification service)
+        verificationResult : VerificationResult
+      controller operator
+      do
+        let updatedData = attestationData
+              { isVerified = case verificationResult of
+                  Verified -> True
+                  _ -> False
+              }
+        create this with attestationData = updatedData
+        return this.cid
+
+    -- | Archive this attestation
+    consuming choice Archive : ()
+      controller prover
+      do
+        return ()
+
+-- | Verification result from off-chain verification
+data VerificationResult
+  = Verified           -- Cryptographic signature verified
+  | InvalidSignature  -- Signature verification failed
+  | Expired           -- Attestation is too old
+  | NotaryNotTrusted  -- Notary is not in trusted registry
+  deriving (Eq, Show)
+
+-- | KYC verification contract
+template KYCVerification
+  with
+    -- | The user seeking KYC verification
+    user : Party
+    -- | The institution requiring KYC (bank, DeFi protocol, etc.)
+    institution : Party
+    -- | Operator overseeing the verification process
+    operator : Party
+    -- | Reference to the attestation proof
+    attestationCid : ContractId AttestationProof
+    -- | KYC requirements (what attributes must be disclosed)
+    requiredAttributes : [Text]  -- e.g., ["age>18", "country:US", "identity_verified"]
+    -- | Whether all requirements are met
+    isApproved : Bool
+    -- | Timestamp of this verification
+    verifiedAt : Time
+    -- | Expiration of this verification (e.g., 1 year)
+    expiresAt : Time
+  where
+    signatory user, institution, operator
+    observer user, institution, operator
+
+    -- | Approve KYC verification
+    nonconsuming choice ApproveKYC : ContractId KYCVerification
+      controller operator
+      do
+        create this with isApproved = True
+        return this.cid
+
+    -- | Reject KYC verification
+    nonconsuming choice RejectKYC : ContractId KYCVerification
+      with
+        reason : Text
+      controller operator
+      do
+        create this with isApproved = False
+        -- In production, emit event or log reason
+        return this.cid
+
+    -- | Check if this verification is still valid
+    nonconsuming choice IsValid : Bool
+      controller user, institution
+      do
+        let now = getTime
+        return $ isApproved && now < expiresAt
+
+    -- | Archive this verification
+    consuming choice Archive : ()
+      controller user
+      do
+        return ()
+
+-- | Trigger for automated verification workflow
+template AttestationTrigger : Trigger
+  where
+    signatory Trigger.owner
+    observer Trigger.owner
+
+    initialize = pure AttestationTrigger {}
+
+    rule "Verify pending attestations" = do
+      -- Find all pending AttestationProof contracts
+      pendingProofs <- Trigger.query @AttestationProof
+
+      -- For each pending proof, trigger verification
+      traverse_ verifyProof pendingProofs
+
+    rule "Check expired verifications" = do
+      -- Find all KYCVerification contracts
+      verifications <- Trigger.query @KYCVerification
+
+      -- Check if any have expired
+      traverse_ checkExpiration verifications
+
+-- | Helper function to verify an attestation proof
+verifyProof : ContractId AttestationProof -> TriggerA ()
+verifyProof proofCid = do
+  proof <- fetch proofCid
+  if not (attestationData proof).isVerified
+  then do
+    -- In production, call off-chain verification service
+    -- For now, simulate verification
+    let verificationResult = Verified
+    exercise proofCid (VerifyAttestation verificationResult)
+  else pure ()
+
+-- | Helper function to check if verification has expired
+checkExpiration : ContractId KYCVerification -> TriggerA ()
+checkExpiration verifCid = do
+  verif <- fetch verifCid
+  let now = getTime
+  if now >= expiresAt verif && isApproved verif
+  then do
+    -- Mark as expired (in production, emit event)
+    exercise verifCid (RejectKYC "Verification expired")
+  else pure ()

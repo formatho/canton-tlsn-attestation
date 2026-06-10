@@ -1,0 +1,14 @@
+version: "2.6"
+name: canton-tlsn-attestation
+sdk-version: 3.3.0
+version: 1.0.0
+exposed-modules:
+  - TLSNotaryAttestation
+  - TLSNotaryAttestation.Examples
+  - TLSNotaryAttestation.Tests
+dependencies:
+  - daml-prim
+  - daml-stdlib
+  - daml-trigger
+description: Canton smart contracts for verifying TLSNotary attestations with privacy-preserving KYC verification
+source: .

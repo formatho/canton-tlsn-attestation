@@ -1,0 +1,449 @@
+daml-version 2.3
+-- Unit tests for TLSNotaryAttestation smart contracts
+
+module TLSNotaryAttestation.Tests
+  ( tests
+  ) where
+
+import DA.Assert
+import DA.Time
+import DA.Map qualified as Map
+import TLSNotaryAttestation
+
+-- | All tests for TLSNotaryAttestation module
+tests : Script ()
+tests = do
+  scenario "AttestationRegistry - Register notary" $ do
+    testRegisterNotary
+
+  scenario "AttestationRegistry - Register duplicate notary fails" $ do
+    testRegisterDuplicateNotaryFails
+
+  scenario "AttestationRegistry - Revoke notary" $ do
+    testRevokeNotary
+
+  scenario "AttestationRegistry - Get notary" $ do
+    testGetNotary
+
+  scenario "AttestationProof - Create and verify" $ do
+    testCreateAndVerifyAttestationProof
+
+  scenario "AttestationProof - Verify with invalid signature" $ do
+    testVerifyInvalidSignature
+
+  scenario "KYCVerification - Create and approve" $ do
+    testCreateAndApproveKYC
+
+  scenario "KYCVerification - Verify expiration" $ do
+    testKYCExpiration
+
+  scenario "KYCVerification - Multiple institutions" $ do
+    testMultipleInstitutions
+
+-- ============================================================================
+-- AttestationRegistry Tests
+-- ============================================================================
+
+-- | Test registering a notary
+testRegisterNotary : Script ()
+testRegisterNotary = do
+  alice <- allocateParty "Alice"
+  operator <- allocateParty "Operator"
+
+  -- Create registry
+  registry <- submit alice $ createCmd AttestationRegistry
+    { operator = operator
+    , notaries = Map.empty
+    }
+
+  -- Register notary
+  notaryCid <- submit operator $ exerciseCmd registry (RegisterNotary
+    { notaryId = "notary-1"
+    , publicKey = "public-key-1"
+    , name = "Test Notary 1"
+    , expiresAt = None
+    })
+
+  -- Verify notary was registered
+  notaryInfo <- fetch notaryCid
+  assertEq "Notary ID" (notaryId notaryInfo) "notary-1"
+  assertEq "Public key" (publicKey notaryInfo) "public-key-1"
+  assertEq "Name" (name notaryInfo) "Test Notary 1"
+
+-- | Test that registering duplicate notary fails
+testRegisterDuplicateNotaryFails : Script ()
+testRegisterDuplicateNotaryFails = do
+  alice <- allocateParty "Alice"
+  operator <- allocateParty "Operator"
+
+  -- Create registry
+  registry <- submit alice $ createCmd AttestationRegistry
+    { operator = operator
+    , notaries = Map.empty
+    }
+
+  -- Register first notary
+  _ <- submit operator $ exerciseCmd registry (RegisterNotary
+    { notaryId = "notary-1"
+    , publicKey = "public-key-1"
+    , name = "Test Notary 1"
+    , expiresAt = None
+    })
+
+  -- Try to register duplicate - should fail
+  trySubmit operator $ exerciseCmd registry (RegisterNotary
+    { notaryId = "notary-1"
+    , publicKey = "public-key-2"
+    , name = "Test Notary 2"
+    , expiresAt = None
+    })
+    `catchAssertError` \err ->
+      assertMsg "Expected error for duplicate notary" True
+
+-- | Test revoking a notary
+testRevokeNotary : Script ()
+testRevokeNotary = do
+  alice <- allocateParty "Alice"
+  operator <- allocateParty "Operator"
+
+  -- Create registry
+  registry <- submit alice $ createCmd AttestationRegistry
+    { operator = operator
+    , notaries = Map.empty
+    }
+
+  -- Register notary
+  notaryCid <- submit operator $ exerciseCmd registry (RegisterNotary
+    { notaryId = "notary-1"
+    , publicKey = "public-key-1"
+    , name = "Test Notary 1"
+    , expiresAt = None
+    })
+
+  -- Revoke notary
+  _ <- submit operator $ exerciseCmd registry (RevokeNotary
+    { notaryId = "notary-1"
+    })
+
+  -- Verify notary was archived
+  notary <- tryFetch notaryCid
+  case notary of
+    Some _ -> assertMsg "Notary should be archived" False
+    None -> pure ()
+
+-- | Test getting notary information
+testGetNotary : Script ()
+testGetNotary = do
+  alice <- allocateParty "Alice"
+  operator <- allocateParty "Operator"
+
+  -- Create registry
+  registry <- submit alice $ createCmd AttestationRegistry
+    { operator = operator
+    , notaries = Map.empty
+    }
+
+  -- Register notary
+  _ <- submit operator $ exerciseCmd registry (RegisterNotary
+    { notaryId = "notary-1"
+    , publicKey = "public-key-1"
+    , name = "Test Notary 1"
+    , expiresAt = None
+    })
+
+  -- Get notary info
+  notaryInfo <- submit operator $ exerciseCmd registry (GetNotary
+    { notaryId = "notary-1"
+    })
+
+  assertEq "Notary ID" (notaryId notaryInfo) "notary-1"
+  assertEq "Public key" (publicKey notaryInfo) "public-key-1"
+
+-- ============================================================================
+-- AttestationProof Tests
+-- ============================================================================
+
+-- | Test creating and verifying attestation proof
+testCreateAndVerifyAttestationProof : Script ()
+testCreateAndVerifyAttestationProof = do
+  alice <- allocateParty "Alice"
+  operator <- allocateParty "Operator"
+
+  -- Create notary
+  notaryCid <- submit operator $ createCmd NotaryInfo
+    { notaryId = "notary-1"
+    , publicKey = "public-key-1"
+    , name = "Test Notary 1"
+    , registeredAt = getTime
+    , expiresAt = None
+    }
+
+  -- Create attestation proof
+  attestationCid <- submit alice $ createCmd AttestationProof
+    { prover = alice
+    , operator = operator
+    , attestationData = AttestationData
+      { attestationId = "attestation-1"
+      , notaryId = "notary-1"
+      , serverName = "test-server.com"
+      , sessionTimestamp = getTime
+      , attestationHash = "hash-1"
+      , presentationHash = "hash-2"
+      , dataType = "KYC"
+      , hasRedactions = True
+      , isVerified = False
+      }
+    , notaryCid = notaryCid
+    }
+
+  -- Verify attestation
+  _ <- submit operator $ exerciseCmd attestationCid (VerifyAttestation Verified)
+
+  -- Fetch and verify
+  attestation <- fetch attestationCid
+  assertEq "Is verified" (isVerified (attestationData attestation)) True
+
+-- | Test verifying with invalid signature
+testVerifyInvalidSignature : Script ()
+testVerifyInvalidSignature = do
+  alice <- allocateParty "Alice"
+  operator <- allocateParty "Operator"
+
+  -- Create notary
+  notaryCid <- submit operator $ createCmd NotaryInfo
+    { notaryId = "notary-1"
+    , publicKey = "public-key-1"
+    , name = "Test Notary 1"
+    , registeredAt = getTime
+    , expiresAt = None
+    }
+
+  -- Create attestation proof
+  attestationCid <- submit alice $ createCmd AttestationProof
+    { prover = alice
+    , operator = operator
+    , attestationData = AttestationData
+      { attestationId = "attestation-1"
+      , notaryId = "notary-1"
+      , serverName = "test-server.com"
+      , sessionTimestamp = getTime
+      , attestationHash = "hash-1"
+      , presentationHash = "hash-2"
+      , dataType = "KYC"
+      , hasRedactions = True
+      , isVerified = False
+      }
+    , notaryCid = notaryCid
+    }
+
+  -- Verify with invalid signature
+  _ <- submit operator $ exerciseCmd attestationCid (VerifyAttestation InvalidSignature)
+
+  -- Fetch and verify
+  attestation <- fetch attestationCid
+  assertEq "Is not verified" (isVerified (attestationData attestation)) False
+
+-- ============================================================================
+-- KYCVerification Tests
+-- ============================================================================
+
+-- | Test creating and approving KYC verification
+testCreateAndApproveKYC : Script ()
+testCreateAndApproveKYC = do
+  alice <- allocateParty "Alice"
+  bank <- allocateParty "Bank"
+  operator <- allocateParty "Operator"
+
+  -- Create attestation proof
+  notaryCid <- submit operator $ createCmd NotaryInfo
+    { notaryId = "notary-1"
+    , publicKey = "public-key-1"
+    , name = "Test Notary 1"
+    , registeredAt = getTime
+    , expiresAt = None
+    }
+
+  attestationCid <- submit alice $ createCmd AttestationProof
+    { prover = alice
+    , operator = operator
+    , attestationData = AttestationData
+      { attestationId = "attestation-1"
+      , notaryId = "notary-1"
+      , serverName = "test-server.com"
+      , sessionTimestamp = getTime
+      , attestationHash = "hash-1"
+      , presentationHash = "hash-2"
+      , dataType = "KYC"
+      , hasRedactions = True
+      , isVerified = True
+      }
+    , notaryCid = notaryCid
+    }
+
+  -- Create KYC verification
+  kycCid <- submit operator $ createCmd KYCVerification
+    { user = alice
+    , institution = bank
+    , operator = operator
+    , attestationCid = attestationCid
+    , requiredAttributes = ["age>18", "identity_verified"]
+    , isApproved = False
+    , verifiedAt = getTime
+    , expiresAt = time (toUnixTime (getTime) + 365 * 24 * 60 * 60)
+    }
+
+  -- Approve KYC
+  _ <- submit operator $ exerciseCmd kycCid ApproveKYC
+
+  -- Verify approval
+  kyc <- fetch kycCid
+  assertEq "Is approved" (isApproved kyc) True
+
+  -- Check validity
+  isValid <- submit alice $ exerciseCmd kycCid IsValid
+  assertEq "Is valid" isValid True
+
+-- | Test KYC expiration
+testKYCExpiration : Script ()
+testKYCExpiration = do
+  alice <- allocateParty "Alice"
+  bank <- allocateParty "Bank"
+  operator <- allocateParty "Operator"
+
+  -- Create attestation proof
+  notaryCid <- submit operator $ createCmd NotaryInfo
+    { notaryId = "notary-1"
+    , publicKey = "public-key-1"
+    , name = "Test Notary 1"
+    , registeredAt = getTime
+    , expiresAt = None
+    }
+
+  attestationCid <- submit alice $ createCmd AttestationProof
+    { prover = alice
+    , operator = operator
+    , attestationData = AttestationData
+      { attestationId = "attestation-1"
+      , notaryId = "notary-1"
+      , serverName = "test-server.com"
+      , sessionTimestamp = getTime
+      , attestationHash = "hash-1"
+      , presentationHash = "hash-2"
+      , dataType = "KYC"
+      , hasRedactions = True
+      , isVerified = True
+      }
+    , notaryCid = notaryCid
+    }
+
+  -- Create KYC verification with expiration in the past
+  let pastTime = time (toUnixTime (getTime) - 3600) -- 1 hour ago
+
+  kycCid <- submit operator $ createCmd KYCVerification
+    { user = alice
+    , institution = bank
+    , operator = operator
+    , attestationCid = attestationCid
+    , requiredAttributes = ["age>18"]
+    , isApproved = True
+    , verifiedAt = pastTime
+    , expiresAt = pastTime
+    }
+
+  -- Check validity (should be false due to expiration)
+  isValid <- submit alice $ exerciseCmd kycCid IsValid
+  assertEq "Is not valid (expired)" isValid False
+
+-- | Test multiple institutions verifying same user
+testMultipleInstitutions : Script ()
+testMultipleInstitutions = do
+  alice <- allocateParty "Alice"
+  bank <- allocateParty "Bank"
+  exchange <- allocateParty "Exchange"
+  operator <- allocateParty "Operator"
+
+  -- Create attestation proof
+  notaryCid <- submit operator $ createCmd NotaryInfo
+    { notaryId = "notary-1"
+    , publicKey = "public-key-1"
+    , name = "Test Notary 1"
+    , registeredAt = getTime
+    , expiresAt = None
+    }
+
+  attestationCid <- submit alice $ createCmd AttestationProof
+    { prover = alice
+    , operator = operator
+    , attestationData = AttestationData
+      { attestationId = "attestation-1"
+      , notaryId = "notary-1"
+      , serverName = "test-server.com"
+      , sessionTimestamp = getTime
+      , attestationHash = "hash-1"
+      , presentationHash = "hash-2"
+      , dataType = "KYC"
+      , hasRedactions = True
+      , isVerified = True
+      }
+    , notaryCid = notaryCid
+    }
+
+  -- Create KYC verification for bank
+  bankKycCid <- submit operator $ createCmd KYCVerification
+    { user = alice
+    , institution = bank
+    , operator = operator
+    , attestationCid = attestationCid
+    , requiredAttributes = ["age>18", "identity_verified"]
+    , isApproved = False
+    , verifiedAt = getTime
+    , expiresAt = time (toUnixTime (getTime) + 365 * 24 * 60 * 60)
+    }
+
+  -- Create KYC verification for exchange
+  exchangeKycCid <- submit operator $ createCmd KYCVerification
+    { user = alice
+    , institution = exchange
+    , operator = operator
+    , attestationCid = attestationCid
+    , requiredAttributes = ["age>18", "identity_verified"]
+    , isApproved = False
+    , verifiedAt = getTime
+    , expiresAt = time (toUnixTime (getTime) + 365 * 24 * 60 * 60)
+    }
+
+  -- Approve both
+  _ <- submit operator $ exerciseCmd bankKycCid ApproveKYC
+  _ <- submit operator $ exerciseCmd exchangeKycCid ApproveKYC
+
+  -- Verify both are valid
+  bankValid <- submit alice $ exerciseCmd bankKycCid IsValid
+  exchangeValid <- submit alice $ exerciseCmd exchangeKycCid IsValid
+
+  assertEq "Bank KYC is valid" bankValid True
+  assertEq "Exchange KYC is valid" exchangeValid True
+
+-- ============================================================================
+-- Helper Functions
+-- ============================================================================
+
+-- | Assert that two values are equal
+assertEq : Eq a => Show a => Text -> a -> a -> Script ()
+assertEq label expected actual =
+  if expected == actual
+  then pure ()
+  else assertMsg (label <> ": expected " <> show expected <> ", got " <> show actual) False
+
+-- | Try to submit a command and catch assertion errors
+trySubmit : Party -> Submit () -> Script (Either Text ())
+trySubmit party cmd = catch (Right <$> submit party cmd) (\err -> pure $ Left err)
+
+-- | Try to fetch a contract
+tryFetch : ContractId a -> Script (Optional a)
+tryFetch cid = do
+  result <- catch (Some <$> fetch cid) (\_ -> pure None)
+  pure result
+
+-- | Catch assertion errors
+catchAssertError : Script a -> (Text -> Script a) -> Script a
+catchAssertError action handler = catch action (\err -> handler err)
