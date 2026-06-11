@@ -25,13 +25,12 @@ jobs:
         echo "$HOME/.daml/bin" >> $GITHUB_PATH
 
     - name: Install Rust
-      uses: actions-rs/toolchain@v1
+      uses: dtolnay/rust-toolchain@stable
       with:
         toolchain: stable
-        override: true
 
     - name: Cache Rust dependencies
-      uses: actions/cache@v3
+      uses: actions/cache@v4
       with:
         path: |
           ~/.cargo/registry
@@ -98,7 +97,7 @@ jobs:
 
     - name: Upload test artifacts
       if: always()
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: integration-test-artifacts
         path: |
@@ -108,7 +107,7 @@ jobs:
 
     - name: Upload test logs
       if: always()
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: integration-test-logs
         path: |
@@ -154,11 +153,11 @@ jobs:
     - name: Run DAML unit tests
       run: |
         cd daml
-        daml test --dar .daml/dist/canton-tlsn-attestation-1.0.0.dar
+        daml test --dar .daml/dist/canton-tlsn-attestation-1.0.0.dar --no-wall-clock-time
 
     - name: Run DAML integration tests
       run: |
         cd daml
-        daml test --dar .daml/dist/canton-tlsn-attestation-1.0.0.dar \
+        daml test --dar .daml/dist/canton-tlsn-attestation-1.0.0.dar --no-wall-clock-time \
           --scenario-name "End-to-end TLSNotary integration" \
           --scenario-name "Multi-institution trust flow"
