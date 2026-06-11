@@ -1,4 +1,5 @@
 daml-version 2.3
+
 -- Integration tests for TLSNotary + Canton end-to-end flow
 
 module TLSNotaryAttestation.IntegrationTests
