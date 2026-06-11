@@ -1,6 +1,4 @@
-daml-version 2.3
-
--- Example usage and test scenarios for TLSNotary attestation
+daml-version 1.18
 
 module TLSNotaryAttestation.Examples
   ( exampleKYCFlow

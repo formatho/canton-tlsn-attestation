@@ -1,6 +1,4 @@
-daml-version 2.3
-
--- Unit tests for TLSNotaryAttestation smart contracts
+daml-version 1.18
 
 module TLSNotaryAttestation.Tests
   ( tests
