@@ -1,4 +1,4 @@
-daml 1.18
+daml 1.2
 
 module TLSNotaryAttestation.Tests
   ( tests
