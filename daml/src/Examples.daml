@@ -1,4 +1,4 @@
-daml-version 1.18
+daml 1.18
 
 module TLSNotaryAttestation.Examples
   ( exampleKYCFlow
