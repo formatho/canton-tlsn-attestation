@@ -1,6 +1,6 @@
 version: "2.6"
 name: canton-tlsn-attestation
-sdk-version: 3.3.0
+sdk-version: 2.10.4
 project-version: 1.0.0
 exposed-modules:
   - TLSNotaryAttestation
